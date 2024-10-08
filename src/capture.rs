@@ -1,4 +1,12 @@
+use std::io::Error;
+use std::mem;
 use std::mem::size_of;
+
+use std::ptr;
+
+use winapi::shared::minwindef::{BOOL, LPARAM, TRUE};
+use winapi::shared::windef::{HDC, HMONITOR, LPRECT};
+use winapi::um::winuser::{EnumDisplayMonitors, GetMonitorInfoW, MONITORINFOEXW};
 use windows::Win32::Foundation::{ERROR_INVALID_PARAMETER, E_FAIL, HWND};
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
@@ -45,6 +53,14 @@ pub struct RgbBuf {
     pub pixels: Vec<u8>,
     pub width: u32,
     pub height: u32,
+}
+
+#[derive(Debug)]
+pub struct MonitorInfo {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
 }
 
 pub fn capture_window(hwnd: isize) -> Result<RgbBuf, windows::core::Error> {
@@ -163,6 +179,16 @@ pub fn capture_window_ex(
 
 pub fn capture_display() -> Result<RgbBuf, WSError> {
     unsafe {
+        let x = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        let y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        let width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        let height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+
+        return capture(x, y, width, height);
+    }
+}
+pub fn capture(x: i32, y: i32, width: i32, height: i32) -> Result<RgbBuf, WSError> {
+    unsafe {
         // win 8.1 temporary DPI aware
         #[allow(unused_must_use)]
         {
@@ -180,11 +206,6 @@ pub fn capture_display() -> Result<RgbBuf, WSError> {
             ReleaseDC(HWND::default(), hdc_screen);
             return Err(WSError::CreateCompatibleDCIsNull);
         }
-
-        let x = GetSystemMetrics(SM_XVIRTUALSCREEN);
-        let y = GetSystemMetrics(SM_YVIRTUALSCREEN);
-        let width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-        let height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
 
         let hbmp = CreateCompatibleBitmap(hdc_screen, width, height);
         if hbmp.is_invalid() {
@@ -256,4 +277,66 @@ pub fn capture_display() -> Result<RgbBuf, WSError> {
             height: height as u32,
         })
     }
+}
+
+pub fn monitor_count() -> usize {
+    return enumerate_monitors().len();
+}
+pub fn monitors() -> Vec<MonitorInfo> {
+    let monitorinfoexw = enumerate_monitors();
+    let mut monitors: Vec<MonitorInfo> = Vec::new();
+    for m in monitorinfoexw {
+        let x = m.rcMonitor.left;
+        let y = m.rcMonitor.top;
+        let width = m.rcMonitor.right - m.rcMonitor.left;
+        let height = m.rcMonitor.bottom - m.rcMonitor.top;
+        monitors.insert(
+            monitors.len(),
+            MonitorInfo {
+                x,
+                y,
+                width,
+                height,
+            },
+        );
+    }
+    monitors
+}
+fn enumerate_monitors() -> Vec<MONITORINFOEXW> {
+    let mut monitors = Vec::<MONITORINFOEXW>::new();
+    let userdata = &mut monitors as *mut _;
+
+    let result = unsafe {
+        EnumDisplayMonitors(
+            ptr::null_mut(),
+            ptr::null(),
+            Some(enumerate_monitors_callback),
+            userdata as LPARAM,
+        )
+    };
+
+    if result != TRUE {
+        panic!("Could not enumerate monitors: {}", Error::last_os_error());
+    }
+
+    monitors
+}
+
+unsafe extern "system" fn enumerate_monitors_callback(
+    monitor: HMONITOR,
+    _: HDC,
+    _: LPRECT,
+    userdata: LPARAM,
+) -> BOOL {
+    let monitors: &mut Vec<MONITORINFOEXW> = mem::transmute(userdata);
+
+    let mut monitor_info: MONITORINFOEXW = mem::zeroed();
+    monitor_info.cbSize = mem::size_of::<MONITORINFOEXW>() as u32;
+    let monitor_info_ptr = <*mut _>::cast(&mut monitor_info);
+
+    let result = GetMonitorInfoW(monitor, monitor_info_ptr);
+    if result == TRUE {
+        monitors.push(monitor_info);
+    }
+    TRUE
 }
